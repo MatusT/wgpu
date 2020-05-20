@@ -67,6 +67,7 @@ pub enum RenderCommand {
         phantom_offsets: PhantomSlice<DynamicOffset>,
     },
     SetPipeline(id::RenderPipelineId),
+    SetMeshPipeline(id::RenderPipelineId),
     SetIndexBuffer {
         buffer_id: id::BufferId,
         offset: BufferAddress,
@@ -107,6 +108,9 @@ pub enum RenderCommand {
     DrawIndexedIndirect {
         buffer_id: id::BufferId,
         offset: BufferAddress,
+    },
+    DrawMeshTasks {
+        tasks_count: u32,
     },
     End,
 }
@@ -820,7 +824,8 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                     .map(|resolve| view_guard[resolve].format)
                     .collect(),
                 depth_stencil: depth_stencil_attachment.map(|at| view_guard[at.attachment].format),
-            };
+            };            
+
             (context, sample_count)
         };
 
@@ -847,6 +852,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             first_vertex: 0,
             first_instance: 0,
         };
+
         loop {
             assert!(
                 unsafe { peeker.add(RenderCommand::max_size()) <= raw_data_end },
@@ -887,6 +893,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                         .bind_groups
                         .use_extend(&*bind_group_guard, bind_group_id, (), ())
                         .unwrap();
+
                     assert_eq!(bind_group.dynamic_count, offsets.len());
 
                     trackers.merge_extend(&bind_group.used);
@@ -1016,6 +1023,69 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                         vbs.rate = InputStepMode::Vertex;
                     }
                     state.vertex.update_limits();
+                }
+                RenderCommand::SetMeshPipeline(pipeline_id) => {
+                    state.pipeline = OptionalState::Set;
+                    let pipeline = trackers
+                        .render_pipes
+                        .use_extend(&*pipeline_guard, pipeline_id, (), ())
+                        .unwrap();
+
+                    assert!(
+                        context.compatible(&pipeline.pass_context),
+                        "The mesh pipeline is not compatible with the pass!"
+                    );
+                    assert_eq!(
+                        pipeline.sample_count, sample_count,
+                        "The mesh pipeline and renderpass have mismatching sample_count"
+                    );
+
+                    state
+                        .blend_color
+                        .require(pipeline.flags.contains(PipelineFlags::BLEND_COLOR));
+                    state
+                        .stencil_reference
+                        .require(pipeline.flags.contains(PipelineFlags::STENCIL_REFERENCE));
+
+                    unsafe {
+                        raw.bind_graphics_pipeline(&pipeline.raw);
+                    }
+
+                    // Rebind resource
+                    if state.binder.pipeline_layout_id != Some(pipeline.layout_id.value) {
+                        let pipeline_layout = &pipeline_layout_guard[pipeline.layout_id.value];
+                        state.binder.pipeline_layout_id = Some(pipeline.layout_id.value);
+                        state
+                            .binder
+                            .reset_expectations(pipeline_layout.bind_group_layout_ids.len());
+                        let mut is_compatible = true;
+
+                        for (index, (entry, bgl_id)) in state
+                            .binder
+                            .entries
+                            .iter_mut()
+                            .zip(&pipeline_layout.bind_group_layout_ids)
+                            .enumerate()
+                        {
+                            match entry.expect_layout(bgl_id.value) {
+                                LayoutChange::Match(bg_id, offsets) if is_compatible => {
+                                    let desc_set = bind_group_guard[bg_id].raw.raw();
+                                    unsafe {
+                                        raw.bind_graphics_descriptor_sets(
+                                            &pipeline_layout.raw,
+                                            index,
+                                            iter::once(desc_set),
+                                            offsets.iter().cloned(),
+                                        );
+                                    }
+                                }
+                                LayoutChange::Match(..) | LayoutChange::Unchanged => {}
+                                LayoutChange::Mismatch => {
+                                    is_compatible = false;
+                                }
+                            }
+                        }
+                    }
                 }
                 RenderCommand::SetIndexBuffer {
                     buffer_id,
@@ -1210,6 +1280,17 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                         raw.draw_indexed_indirect(&buffer.raw, offset, 1, 0);
                     }
                 }
+                RenderCommand::DrawMeshTasks {
+                    tasks_count,
+                } => {
+                    state.is_ready().unwrap();
+                    unsafe {
+                        raw.draw_mesh_tasks(
+                            tasks_count,
+                            0,
+                        );
+                    }
+                }
                 RenderCommand::End => break,
             }
         }
@@ -1309,6 +1390,14 @@ pub mod render_ffi {
         pipeline_id: id::RenderPipelineId,
     ) {
         pass.encode(&RenderCommand::SetPipeline(pipeline_id));
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn wgpu_render_pass_set_mesh_pipeline(
+        pass: &mut RawPass,
+        pipeline_id: id::RenderPipelineId,
+    ) {
+        pass.encode(&RenderCommand::SetMeshPipeline(pipeline_id));
     }
 
     #[no_mangle]
@@ -1432,6 +1521,16 @@ pub mod render_ffi {
         offset: BufferAddress,
     ) {
         pass.encode(&RenderCommand::DrawIndexedIndirect { buffer_id, offset });
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn wgpu_render_pass_draw_mesh_tasks(
+        pass: &mut RawPass,
+        tasks_count: u32,
+    ) {
+        pass.encode(&RenderCommand::DrawMeshTasks {
+            tasks_count
+        });
     }
 
     #[no_mangle]

@@ -126,6 +126,12 @@ pub fn map_shader_stage_flags(shader_stage_flags: wgt::ShaderStage) -> hal::pso:
     if shader_stage_flags.contains(Ss::COMPUTE) {
         value |= H::COMPUTE;
     }
+    if shader_stage_flags.contains(Ss::TASK) {
+        value |= H::TASK;
+    }
+    if shader_stage_flags.contains(Ss::MESH) {
+        value |= H::MESH;
+    }
     value
 }
 

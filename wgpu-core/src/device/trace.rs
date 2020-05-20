@@ -90,6 +90,22 @@ pub struct RenderPipelineDescriptor {
     pub sample_mask: u32,
     pub alpha_to_coverage_enabled: bool,
 }
+#[derive(Debug)]
+#[cfg_attr(feature = "trace", derive(serde::Serialize))]
+#[cfg_attr(feature = "replay", derive(serde::Deserialize))]
+pub struct MeshPipelineDescriptor {
+    pub layout: id::PipelineLayoutId,
+    pub task_stage: Option<ProgrammableStageDescriptor>,
+    pub mesh_stage: ProgrammableStageDescriptor,
+    pub fragment_stage: Option<ProgrammableStageDescriptor>,
+    pub primitive_topology: wgt::PrimitiveTopology,
+    pub rasterization_state: Option<wgt::RasterizationStateDescriptor>,
+    pub color_states: Vec<wgt::ColorStateDescriptor>,
+    pub depth_stencil_state: Option<wgt::DepthStencilStateDescriptor>,
+    pub sample_count: u32,
+    pub sample_mask: u32,
+    pub alpha_to_coverage_enabled: bool,
+}
 
 #[derive(Debug)]
 #[cfg_attr(feature = "trace", derive(serde::Serialize))]
@@ -162,6 +178,11 @@ pub enum Action {
         desc: RenderPipelineDescriptor,
     },
     DestroyRenderPipeline(id::RenderPipelineId),
+    CreateMeshPipeline {
+        id: id::RenderPipelineId,
+        desc: MeshPipelineDescriptor,
+    },
+    DestroyMeshPipeline(id::RenderPipelineId),
     WriteBuffer {
         id: id::BufferId,
         data: FileName,

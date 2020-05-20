@@ -108,11 +108,9 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             .lock()
             .allocate(
                 &device.raw,
-                requirements.type_mask as u32,
+                &requirements,
                 gfx_memory::MemoryUsage::Staging { read_back: false },
                 gfx_memory::Kind::Linear,
-                requirements.size,
-                requirements.alignment,
             )
             .unwrap();
         unsafe {

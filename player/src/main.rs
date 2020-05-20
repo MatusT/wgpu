@@ -402,6 +402,39 @@ impl GlobalExt for wgc::hub::Global<IdentityPassThroughFactory> {
             A::DestroyRenderPipeline(id) => {
                 self.render_pipeline_destroy::<B>(id);
             }
+            A::CreateMeshPipeline { id, desc } => {
+                let task_stage = desc.task_stage.map(OwnedProgrammableStage::from);
+                let mesh_stage = OwnedProgrammableStage::from(desc.mesh_stage);
+                let fragment_stage = desc.fragment_stage.map(OwnedProgrammableStage::from);
+                self.device_maintain_ids::<B>(device);
+                self.device_create_mesh_pipeline::<B>(
+                    device,
+                    &wgc::pipeline::MeshPipelineDescriptor {
+                        layout: desc.layout,
+                        task_stage: task_stage.as_ref().map_or(ptr::null(), |s| &s.desc),
+                        mesh_stage: mesh_stage.desc,
+                        fragment_stage: fragment_stage.as_ref().map_or(ptr::null(), |s| &s.desc),
+                        primitive_topology: desc.primitive_topology,
+                        rasterization_state: desc
+                            .rasterization_state
+                            .as_ref()
+                            .map_or(ptr::null(), |rs| rs),
+                        color_states: desc.color_states.as_ptr(),
+                        color_states_length: desc.color_states.len(),
+                        depth_stencil_state: desc
+                            .depth_stencil_state
+                            .as_ref()
+                            .map_or(ptr::null(), |ds| ds),
+                        sample_count: desc.sample_count,
+                        sample_mask: desc.sample_mask,
+                        alpha_to_coverage_enabled: desc.alpha_to_coverage_enabled,
+                    },
+                    id,
+                );
+            }
+            A::DestroyMeshPipeline(id) => {
+                self.mesh_pipeline_destroy::<B>(id);
+            }
             A::WriteBuffer {
                 id,
                 data,

@@ -7,7 +7,7 @@ use crate::{
     hub::{GfxBackend, Global, GlobalIdentityHandlerFactory, Input, Token},
     id, pipeline, resource, swap_chain,
     track::{BufferState, TextureState, TrackerSet},
-    FastHashMap, LifeGuard, PrivateFeatures, Stored,
+    FastHashMap, LifeGuard, PrivateFeatures, Stored
 };
 
 use arrayvec::ArrayVec;
@@ -58,6 +58,8 @@ pub fn all_buffer_stages() -> hal::pso::PipelineStage {
     Ps::DRAW_INDIRECT
         | Ps::VERTEX_INPUT
         | Ps::VERTEX_SHADER
+        | Ps::TASK_SHADER
+        | Ps::MESH_SHADER
         | Ps::FRAGMENT_SHADER
         | Ps::COMPUTE_SHADER
         | Ps::TRANSFER
@@ -69,6 +71,8 @@ pub fn all_image_stages() -> hal::pso::PipelineStage {
         | Ps::LATE_FRAGMENT_TESTS
         | Ps::COLOR_ATTACHMENT_OUTPUT
         | Ps::VERTEX_SHADER
+        | Ps::TASK_SHADER
+        | Ps::MESH_SHADER
         | Ps::FRAGMENT_SHADER
         | Ps::COMPUTE_SHADER
         | Ps::TRANSFER
@@ -360,11 +364,9 @@ impl<B: GfxBackend> Device<B> {
             .lock()
             .allocate(
                 &self.raw,
-                requirements.type_mask as u32,
+                &requirements,
                 mem_usage,
                 kind,
-                requirements.size,
-                requirements.alignment,
             )
             .unwrap();
 
@@ -456,11 +458,9 @@ impl<B: GfxBackend> Device<B> {
             .lock()
             .allocate(
                 &self.raw,
-                requirements.type_mask as u32,
+                &requirements,
                 gfx_memory::MemoryUsage::Private,
                 gfx_memory::Kind::General,
-                requirements.size,
-                requirements.alignment,
             )
             .unwrap();
 
@@ -1920,14 +1920,6 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                 })
             };
 
-            let shaders = hal::pso::GraphicsShaderSet {
-                vertex,
-                hull: None,
-                domain: None,
-                geometry: None,
-                fragment,
-            };
-
             let subpass = hal::pass::Subpass {
                 index: 0,
                 main_pass,
@@ -1938,12 +1930,19 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             // TODO
             let parent = hal::pso::BasePipeline::None;
 
-            let pipeline_desc = hal::pso::GraphicsPipelineDesc {
-                shaders,
-                rasterizer,
-                vertex_buffers,
+            let primitive_assembler = hal::pso::PrimitiveAssembler::Vertex {
+                buffers: vertex_buffers,
                 attributes,
                 input_assembler,
+                vertex,
+                tessellation: None,
+                geometry: None,
+            };
+
+            let pipeline_desc = hal::pso::GraphicsPipelineDesc {
+                primitive_assembler,
+                rasterizer,
+                fragment,
                 blender,
                 depth_stencil,
                 multisampling,
@@ -2065,6 +2064,334 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             .pipeline_layouts
             .push(layout_id);
     }
+
+    pub fn device_create_mesh_pipeline<B: GfxBackend>(
+        &self,
+        device_id: id::DeviceId,
+        desc: &pipeline::MeshPipelineDescriptor,
+        id_in: Input<G, id::RenderPipelineId>,
+    ) -> id::RenderPipelineId {
+        let hub = B::hub(self);
+        let mut token = Token::root();
+
+        let sc = desc.sample_count;
+        assert!(
+            sc == 1 || sc == 2 || sc == 4 || sc == 8 || sc == 16 || sc == 32,
+            "Invalid sample_count of {}; must be 1, 2, 4, 8, 16, or 32",
+            sc
+        );
+        let sc = sc as u8;
+
+        let color_states =
+            unsafe { slice::from_raw_parts(desc.color_states, desc.color_states_length) };
+        let depth_stencil_state = unsafe { desc.depth_stencil_state.as_ref() };
+
+        let rasterizer = conv::map_rasterization_state_descriptor(
+            &unsafe { desc.rasterization_state.as_ref() }
+                .cloned()
+                .unwrap_or_default(),
+        );
+
+        let blender = hal::pso::BlendDesc {
+            logic_op: None, // TODO
+            targets: color_states
+                .iter()
+                .map(conv::map_color_state_descriptor)
+                .collect(),
+        };
+        let depth_stencil = depth_stencil_state
+            .map(conv::map_depth_stencil_state_descriptor)
+            .unwrap_or_default();
+
+        let multisampling: Option<hal::pso::Multisampling> = if sc == 1 {
+            None
+        } else {
+            Some(hal::pso::Multisampling {
+                rasterization_samples: sc,
+                sample_shading: None,
+                sample_mask: desc.sample_mask as u64,
+                alpha_coverage: desc.alpha_to_coverage_enabled,
+                alpha_to_one: false,
+            })
+        };
+
+        // TODO
+        let baked_states = hal::pso::BakedStates {
+            viewport: None,
+            scissor: None,
+            blend_color: None,
+            depth_bounds: None,
+        };
+
+        let (device_guard, mut token) = hub.devices.read(&mut token);
+        let device = &device_guard[device_id];
+        let (raw_pipeline, layout_ref_count) = {
+            let (pipeline_layout_guard, mut token) = hub.pipeline_layouts.read(&mut token);
+            let layout = &pipeline_layout_guard[desc.layout];
+            let (shader_module_guard, _) = hub.shader_modules.read(&mut token);
+
+            let rp_key = RenderPassKey {
+                colors: color_states
+                    .iter()
+                    .map(|at| hal::pass::Attachment {
+                        format: Some(conv::map_texture_format(at.format, device.private_features)),
+                        samples: sc,
+                        ops: hal::pass::AttachmentOps::PRESERVE,
+                        stencil_ops: hal::pass::AttachmentOps::DONT_CARE,
+                        layouts: hal::image::Layout::General..hal::image::Layout::General,
+                    })
+                    .collect(),
+                // We can ignore the resolves as the vulkan specs says:
+                // As an additional special case, if two render passes have a single subpass,
+                // they are compatible even if they have different resolve attachment references
+                // or depth/stencil resolve modes but satisfy the other compatibility conditions.
+                resolves: ArrayVec::new(),
+                depth_stencil: depth_stencil_state.map(|at| hal::pass::Attachment {
+                    format: Some(conv::map_texture_format(at.format, device.private_features)),
+                    samples: sc,
+                    ops: hal::pass::AttachmentOps::PRESERVE,
+                    stencil_ops: hal::pass::AttachmentOps::PRESERVE,
+                    layouts: hal::image::Layout::General..hal::image::Layout::General,
+                }),
+            };
+
+            let mut render_pass_cache = device.render_passes.lock();
+            let main_pass = match render_pass_cache.entry(rp_key) {
+                Entry::Occupied(e) => e.into_mut(),
+                Entry::Vacant(e) => {
+                    let color_ids = [
+                        (0, hal::image::Layout::ColorAttachmentOptimal),
+                        (1, hal::image::Layout::ColorAttachmentOptimal),
+                        (2, hal::image::Layout::ColorAttachmentOptimal),
+                        (3, hal::image::Layout::ColorAttachmentOptimal),
+                    ];
+
+                    let depth_id = (
+                        desc.color_states_length,
+                        hal::image::Layout::DepthStencilAttachmentOptimal,
+                    );
+
+                    let subpass = hal::pass::SubpassDesc {
+                        colors: &color_ids[..desc.color_states_length],
+                        depth_stencil: depth_stencil_state.map(|_| &depth_id),
+                        inputs: &[],
+                        resolves: &[],
+                        preserves: &[],
+                    };
+
+                    let pass = unsafe {
+                        device
+                            .raw
+                            .create_render_pass(e.key().all(), &[subpass], &[])
+                    }
+                    .unwrap();
+                    e.insert(pass)
+                }
+            };
+
+            let task = {
+                let task_stage = unsafe { desc.task_stage.as_ref() };
+                task_stage.map(|stage| {
+                    let entry_point_name = unsafe { ffi::CStr::from_ptr(stage.entry_point) }
+                        .to_str()
+                        .to_owned()
+                        .unwrap();
+
+                    let shader_module = &shader_module_guard[stage.module];
+
+                    if let Some(ref module) = shader_module.module {
+                        if let Err(e) =
+                            validate_shader(module, entry_point_name, ExecutionModel::TaskNV)
+                        {
+                            log::error!("Failed validating task shader module: {:?}", e);
+                        }
+                    }
+
+                    hal::pso::EntryPoint::<B> {
+                        entry: entry_point_name, // TODO
+                        module: &shader_module.raw,
+                        specialization: hal::pso::Specialization::EMPTY,
+                    }
+                })
+            };
+
+            let mesh = {
+                let entry_point_name =
+                    unsafe { ffi::CStr::from_ptr(desc.mesh_stage.entry_point) }
+                        .to_str()
+                        .to_owned()
+                        .unwrap();
+
+                let shader_module = &shader_module_guard[desc.mesh_stage.module];
+
+                if let Some(ref module) = shader_module.module {
+                    if let Err(e) =
+                        validate_shader(module, entry_point_name, ExecutionModel::MeshNV)
+                    {
+                        log::error!("Failed validating mesh shader module: {:?}", e);
+                    }
+                }
+
+                hal::pso::EntryPoint::<B> {
+                    entry: entry_point_name, // TODO
+                    module: &shader_module.raw,
+                    specialization: hal::pso::Specialization::EMPTY,
+                }
+            };
+
+            let fragment = {
+                let fragment_stage = unsafe { desc.fragment_stage.as_ref() };
+                fragment_stage.map(|stage| {
+                    let entry_point_name = unsafe { ffi::CStr::from_ptr(stage.entry_point) }
+                        .to_str()
+                        .to_owned()
+                        .unwrap();
+
+                    let shader_module = &shader_module_guard[stage.module];
+
+                    if let Some(ref module) = shader_module.module {
+                        if let Err(e) =
+                            validate_shader(module, entry_point_name, ExecutionModel::Fragment)
+                        {
+                            log::error!("Failed validating fragment shader module: {:?}", e);
+                        }
+                    }
+
+                    hal::pso::EntryPoint::<B> {
+                        entry: entry_point_name, // TODO
+                        module: &shader_module.raw,
+                        specialization: hal::pso::Specialization::EMPTY,
+                    }
+                })
+            };
+
+            let subpass = hal::pass::Subpass {
+                index: 0,
+                main_pass,
+            };
+
+            // TODO
+            let flags = hal::pso::PipelineCreationFlags::empty();
+            // TODO
+            let parent = hal::pso::BasePipeline::None;
+
+            let primitive_assembler = hal::pso::PrimitiveAssembler::Mesh {
+                task,
+                mesh,
+            };
+
+            let pipeline_desc = hal::pso::GraphicsPipelineDesc {
+                primitive_assembler,
+                rasterizer,
+                fragment,
+                blender,
+                depth_stencil,
+                multisampling,
+                baked_states,
+                layout: &layout.raw,
+                subpass,
+                flags,
+                parent,
+            };
+
+            // TODO: cache
+            let pipeline = unsafe {
+                device
+                    .raw
+                    .create_graphics_pipeline(&pipeline_desc, None)
+                    .unwrap()
+            };
+            (pipeline, layout.life_guard.add_ref())
+        };
+
+        let pass_context = RenderPassContext {
+            colors: color_states.iter().map(|state| state.format).collect(),
+            resolves: ArrayVec::new(),
+            depth_stencil: depth_stencil_state.map(|state| state.format),
+        };
+
+        let mut flags = pipeline::PipelineFlags::empty();
+        for state in color_states {
+            if state.color_blend.uses_color() | state.alpha_blend.uses_color() {
+                flags |= pipeline::PipelineFlags::BLEND_COLOR;
+            }
+        }
+        if let Some(ds) = depth_stencil_state {
+            if ds.needs_stencil_reference() {
+                flags |= pipeline::PipelineFlags::STENCIL_REFERENCE;
+            }
+        }
+
+        let pipeline = pipeline::RenderPipeline {
+            raw: raw_pipeline,
+            layout_id: Stored {
+                value: desc.layout,
+                ref_count: layout_ref_count,
+            },
+            device_id: Stored {
+                value: device_id,
+                ref_count: device.life_guard.add_ref(),
+            },
+            vertex_strides: Vec::new(),
+            index_format: wgt::IndexFormat::Uint16,
+            pass_context,
+            flags,
+            sample_count: sc,
+            life_guard: LifeGuard::new(),
+        };
+
+        let id = hub
+            .render_pipelines
+            .register_identity(id_in, pipeline, &mut token);
+
+        #[cfg(feature = "trace")]
+        match device.trace {
+            Some(ref trace) => trace.lock().add(trace::Action::CreateMeshPipeline {
+                id,
+                desc: trace::MeshPipelineDescriptor {
+                    layout: desc.layout,
+                    task_stage: unsafe { desc.task_stage.as_ref() }
+                        .map(trace::ProgrammableStageDescriptor::new),
+                    mesh_stage: trace::ProgrammableStageDescriptor::new(&desc.mesh_stage),
+                    fragment_stage: unsafe { desc.fragment_stage.as_ref() }
+                        .map(trace::ProgrammableStageDescriptor::new),
+                    primitive_topology: desc.primitive_topology,
+                    rasterization_state: unsafe { desc.rasterization_state.as_ref() }.cloned(),
+                    color_states: color_states.to_vec(),
+                    depth_stencil_state: depth_stencil_state.cloned(),
+                    sample_count: desc.sample_count,
+                    sample_mask: desc.sample_mask,
+                    alpha_to_coverage_enabled: desc.alpha_to_coverage_enabled,
+                },
+            }),
+            None => (),
+        };
+        id
+    }
+
+    pub fn mesh_pipeline_destroy<B: GfxBackend>(&self, mesh_pipeline_id: id::RenderPipelineId) {
+        let hub = B::hub(self);
+        let mut token = Token::root();
+        let (device_guard, mut token) = hub.devices.read(&mut token);
+
+        let (device_id, layout_id) = {
+            let (mut pipeline_guard, _) = hub.render_pipelines.write(&mut token);
+            let pipeline = &mut pipeline_guard[mesh_pipeline_id];
+            pipeline.life_guard.ref_count.take();
+            (pipeline.device_id.value, pipeline.layout_id.clone())
+        };
+
+        let mut life_lock = device_guard[device_id].lock_life(&mut token);
+        life_lock
+            .suspected_resources
+            .render_pipelines
+            .push(mesh_pipeline_id);
+        life_lock
+            .suspected_resources
+            .pipeline_layouts
+            .push(layout_id);
+    }
+
 
     pub fn device_create_compute_pipeline<B: GfxBackend>(
         &self,

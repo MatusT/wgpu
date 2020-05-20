@@ -114,3 +114,20 @@ impl<B: hal::Backend> Borrow<RefCount> for RenderPipeline<B> {
         self.life_guard.ref_count.as_ref().unwrap()
     }
 }
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct MeshPipelineDescriptor {
+    pub layout: PipelineLayoutId,
+    pub task_stage: *const ProgrammableStageDescriptor,
+    pub mesh_stage: ProgrammableStageDescriptor,
+    pub fragment_stage: *const ProgrammableStageDescriptor,
+    pub primitive_topology: PrimitiveTopology,
+    pub rasterization_state: *const RasterizationStateDescriptor,
+    pub color_states: *const ColorStateDescriptor,
+    pub color_states_length: usize,
+    pub depth_stencil_state: *const DepthStencilStateDescriptor,
+    pub sample_count: u32,
+    pub sample_mask: u32,
+    pub alpha_to_coverage_enabled: bool,
+}

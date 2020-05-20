@@ -560,9 +560,13 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             let (adapter_guard, _) = hub.adapters.read(&mut token);
             let adapter = &adapter_guard[adapter_id];
             let phd = &adapter.raw.physical_device;
-            let wishful_features = hal::Features::VERTEX_STORES_AND_ATOMICS
+            let mut wishful_features = hal::Features::VERTEX_STORES_AND_ATOMICS
                 | hal::Features::FRAGMENT_STORES_AND_ATOMICS
                 | hal::Features::NDC_Y_UP;
+            if desc.extensions.mesh_shaders {
+                wishful_features |= hal::Features::TASK_SHADER;
+                wishful_features |= hal::Features::MESH_SHADER;
+            }
             let enabled_features = adapter.raw.physical_device.features() & wishful_features;
             if enabled_features != wishful_features {
                 log::warn!(

@@ -67,6 +67,7 @@ impl From<Backend> for BackendBit {
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 pub struct Extensions {
     pub anisotropic_filtering: bool,
+    pub mesh_shaders: bool,
 }
 
 #[repr(C)]
@@ -145,6 +146,8 @@ bitflags::bitflags! {
         const VERTEX = 1;
         const FRAGMENT = 2;
         const COMPUTE = 4;
+        const TASK = 5;
+        const MESH = 6;
     }
 }
 

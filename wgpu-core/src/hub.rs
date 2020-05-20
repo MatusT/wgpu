@@ -283,6 +283,7 @@ pub trait GlobalIdentityHandlerFactory:
     + IdentityHandlerFactory<BindGroupId>
     + IdentityHandlerFactory<CommandBufferId>
     + IdentityHandlerFactory<RenderPipelineId>
+    + IdentityHandlerFactory<RenderPipelineId>
     + IdentityHandlerFactory<ComputePipelineId>
     + IdentityHandlerFactory<BufferId>
     + IdentityHandlerFactory<TextureId>
